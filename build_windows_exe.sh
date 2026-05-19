@@ -1,69 +1,57 @@
 #!/usr/bin/env bash
-# build_windows_exe.sh - versão corrigida (sem cmd /c e usando bsdtar)
+# build_windows_32bit.sh - Forçando ambiente 32-bit consistente
 
 set -x
 set -e
 
-WINEPREFIX="$HOME/.wine_rca"
-WINEARCH="win64"
+# Define um prefixo específico para 32-bit
+WINEPREFIX="$HOME/.wine_32bit_rca"
+WINEARCH="win32"
 PYTHON_VERSION="3.10.11"
-PYTHON_INSTALLER="python-${PYTHON_VERSION}-amd64.exe"
+# Baixe a versão 32-bit do Python (sem o -amd64)
+PYTHON_INSTALLER="python-${PYTHON_VERSION}.exe"
 PYTHON_URL="https://www.python.org/ftp/python/${PYTHON_VERSION}/${PYTHON_INSTALLER}"
-RAYLIB_URL="https://github.com/raysan5/raylib/releases/download/6.0/raylib-6.0_win64_msvc16.zip"
+# URL da Raylib 32-bit que você forneceu
+RAYLIB_URL="https://github.com/raysan5/raylib/releases/download/6.0/raylib-6.0_win32_msvc16.zip"
 
 export WINEPREFIX="$WINEPREFIX"
 export WINEARCH="$WINEARCH"
 
-# Baixa raylib.dll se não existir (usando bsdtar, nativo no NixOS)
-if [ ! -f "raylib.dll" ]; then
-    echo "Baixando raylib 6.0 para Windows..."
-    wget -q --show-progress "$RAYLIB_URL" -O raylib-6.0_win64_msvc16.zip
-    bsdtar -xf raylib-6.0_win64_msvc16.zip   # <-- substitui unzip
-    cp raylib-6.0_win64_msvc16/lib/raylib.dll .
-    rm -rf raylib-6.0_win64_msvc16 raylib-6.0_win64_msvc16.zip
-fi
-
-# Cria prefixo Wine se não existir
+# 1. Configura o prefixo Wine 32-bit
 if [ ! -d "$WINEPREFIX" ]; then
-    echo "Criando prefixo Wine 64 bits..."
+    echo "Criando prefixo Wine 32-bit..."
     wineboot -u
-    sleep 3
 fi
 
-# Baixa instalador Python se não existir
+# 2. Baixa raylib.dll 32-bit
+if [ ! -f "raylib.dll" ]; then
+    echo "Baixando raylib 32-bit..."
+    wget -q "$RAYLIB_URL" -O raylib.zip
+    bsdtar -xf raylib.zip
+    cp raylib-6.0_win32_msvc16/lib/raylib.dll .
+    rm -rf raylib-6.0_win32_msvc16 raylib.zip
+fi
+
+# 3. Baixa Python 32-bit (se não existir)
 if [ ! -f "$PYTHON_INSTALLER" ]; then
-    echo "Baixando Python $PYTHON_VERSION para Windows..."
-    wget -q --show-progress "$PYTHON_URL"
+    wget -q "$PYTHON_URL"
 fi
 
-# Instala Python (silencioso) se ainda não estiver instalado
-if ! wine cmd /c "python --version" 2>/dev/null | grep -q "$PYTHON_VERSION"; then
-    echo "Instalando Python no Wine (pode demorar)..."
-    wine "$PYTHON_INSTALLER" /quiet InstallAllUsers=1 PrependPath=1
-    sleep 5
-fi
+# 4. Instala Python 32-bit no Wine
+wine "$PYTHON_INSTALLER" /quiet InstallAllUsers=1 PrependPath=1
 
-# Instala pyinstaller e raylib via pip
-echo "Instalando dependências Python (pyinstaller, raylib)..."
-wine pip install --upgrade pip
-wine pip install pyinstaller raylib
+# 5. Instala dependências
+wine python -m pip install --upgrade pip
+wine python -m pip install pyinstaller raylib
 
-# Cria diretório do projeto dentro do Wine
+# 6. Gera o .exe 32-bit
 PROJECT_DIR="$WINEPREFIX/drive_c/projeto_rca"
 mkdir -p "$PROJECT_DIR"
+cp ui.py raylib.dll "$PROJECT_DIR/"
 
-# Copia ui.py e a DLL baixada para o projeto
-cp ui.py "$PROJECT_DIR/"
-cp raylib.dll "$PROJECT_DIR/"
-
-# Gera o .exe com PyInstaller (execução direta, sem cmd /c problemático)
-echo "Gerando executável (pode levar alguns minutos)..."
 cd "$PROJECT_DIR"
-wine pyinstaller --onefile --name ui --add-data "raylib.dll;." ui.py
-cd - > /dev/null
+wine python -m PyInstaller --onefile --hidden-import sqlite3 --name ui --add-data "raylib.dll;." ui.py
+cd -
 
-# Copia o .exe gerado para o diretório atual
 cp "$PROJECT_DIR/dist/ui.exe" .
-
-echo "SUCESSO! Executável gerado: ./ui.exe"
-echo "Para testar com Wine: wine ./ui.exe"
+echo "SUCESSO! Executável 32-bit gerado."
