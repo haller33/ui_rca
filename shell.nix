@@ -2,11 +2,8 @@
 
 pkgs.mkShell {
   buildInputs = with pkgs; [
-    # System dependencies
     pkg-config
     sqlite
-    
-    # Graphics & Raylib
     raylib
     glfw
     libGL
@@ -15,15 +12,12 @@ pkgs.mkShell {
     xorg.libXi
     xorg.libXinerama
     xorg.libXcursor
-    
-    # Python environment
-    (python3.withPackages (ps: with ps; [
-      pip
-    ]))
+    wineWowPackages.full   # <-- adicionado para Wine 64 bits
+    python3Minimal         # <-- opcional, mas útil
+    unzip   # <--- adicione esta linha
   ];
 
   shellHook = ''
-    # Setup LD_LIBRARY_PATH so pyray can find the installed raylib shared library
     export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [
       pkgs.raylib
       pkgs.glfw
@@ -35,17 +29,13 @@ pkgs.mkShell {
       pkgs.xorg.libXcursor
     ]}:$LD_LIBRARY_PATH
 
-    # Optional: Set up a virtual environment automatically
     if [ ! -d ".venv" ]; then
       python -m venv .venv
     fi
     source .venv/bin/activate
-    
-    # Ensure dependencies are installed
     pip install --upgrade pip
     pip install raylib
-    
-    echo "Python UI development environment ready."
-    echo "To run your UI: python search_ui.py"
+
+    echo "Ambiente pronto. Para gerar .exe: ./build_windows_exe.sh"
   '';
 }
