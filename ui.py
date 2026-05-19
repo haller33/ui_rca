@@ -1,14 +1,10 @@
 import pyray as pr
 import sqlite3
 import os
-import json
-import glob
-import time
 from datetime import datetime
 
 # --- Configuração ---
 DB_PATH = os.path.join(os.path.dirname(__file__), "./db_rca/comments.db")
-RAW_DIR = os.path.join(os.path.dirname(__file__), "./db_rca/raw")
 SCREEN_WIDTH = 1100
 SCREEN_HEIGHT = 800
 
@@ -50,72 +46,6 @@ def safe_timestamp_to_int(ts):
     if isinstance(ts, str):
         return int(ts)
     return ts
-
-# --- Sincronia com arquivos JSON ---
-def parse_comment_from_json(data):
-    """Extrai autor, mensagem e timestamp_usec de um objeto JSON de comentário."""
-    author = data.get("author") or data.get("authorChannelId", {}).get("displayName", "Desconhecido")
-    message = data.get("message") or data.get("messageText", "")
-    ts = data.get("timestamp_usec") or data.get("timestampUsec")
-    if ts is None:
-        ts_sec = data.get("timestamp")
-        if ts_sec:
-            ts = int(float(ts_sec) * 1_000_000)
-    return author, message, ts
-
-def comment_exists(cursor, author, message, timestamp_usec):
-    cursor.execute("SELECT 1 FROM comments WHERE author = ? AND message = ? AND timestamp_usec = ?",
-                   (author, message, timestamp_usec))
-    return cursor.fetchone() is not None
-
-def sync_database(db_path, raw_dir, status_callback=None):
-    """Varre arquivos JSON e insere novos comentários no banco de dados."""
-    if not os.path.exists(raw_dir):
-        if status_callback:
-            status_callback("Pasta de dados brutos não encontrada: " + raw_dir)
-        return 0
-
-    json_files = glob.glob(os.path.join(raw_dir, "*.live_chat.json"), recursive=False)
-    if not json_files:
-        if status_callback:
-            status_callback("Nenhum arquivo .live_chat.json encontrado em " + raw_dir)
-        return 0
-
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    novos = 0
-    total = len(json_files)
-
-    for idx, filepath in enumerate(json_files):
-        if status_callback:
-            status_callback(f"Sincronizando {idx+1}/{total}: {os.path.basename(filepath)}")
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                dados = json.load(f)
-            if isinstance(dados, dict):
-                lista_comentarios = dados.get("comments") or dados.get("items") or []
-            elif isinstance(dados, list):
-                lista_comentarios = dados
-            else:
-                continue
-
-            for item in lista_comentarios:
-                autor, mensagem, ts = parse_comment_from_json(item)
-                if not mensagem or not ts:
-                    continue
-                if not comment_exists(cursor, autor, mensagem, ts):
-                    cursor.execute("INSERT INTO comments (author, message, timestamp_usec) VALUES (?, ?, ?)",
-                                   (autor, mensagem, ts))
-                    novos += 1
-            conn.commit()
-        except Exception as e:
-            print(f"Erro ao processar {filepath}: {e}")
-            continue
-
-    conn.close()
-    if status_callback:
-        status_callback(f"Sincronização concluída. {novos} novos comentários adicionados.")
-    return novos
 
 # --- Consulta ao banco com filtros ---
 def get_filtered_comments(keyword=None, start_usec=None, end_usec=None, limit=50):
@@ -179,13 +109,12 @@ def main():
     # Foco atual
     foco = None  # "busca", "data_inicio", "data_fim"
 
-    # Retângulos dos elementos
+    # Retângulos dos elementos (sem o botão sincronizar)
     busca_rect = pr.Rectangle(50, 80, 400, 40)
     btn_busca_rect = pr.Rectangle(470, 80, 100, 40)
     area_resultados_rect = pr.Rectangle(50, 150, 1000, 600)
-    btn_sincronizar_rect = pr.Rectangle(700, 80, 140, 40)
-    btn_data_busca_rect = pr.Rectangle(860, 80, 100, 40)
-    btn_limpar_rect = pr.Rectangle(970, 80, 80, 40)
+    btn_data_busca_rect = pr.Rectangle(700, 80, 100, 40)
+    btn_limpar_rect = pr.Rectangle(820, 80, 80, 40)
     btn_tema_rect = pr.Rectangle(SCREEN_WIDTH - 60, 20, 40, 40)
     data_inicio_rect = pr.Rectangle(700, 140, 150, 35)
     data_fim_rect = pr.Rectangle(870, 140, 150, 35)
@@ -259,16 +188,6 @@ def main():
             mensagem_status = f"Encontrados {len(resultados)} comentários."
             timer_status = 2.0
 
-        hover_sinc = pr.check_collision_point_rec(mouse_pos, btn_sincronizar_rect)
-        if hover_sinc and pr.is_mouse_button_pressed(pr.MOUSE_BUTTON_LEFT):
-            def callback_status(msg):
-                nonlocal mensagem_status, timer_status
-                mensagem_status = msg
-                timer_status = 2.0
-                pr.begin_drawing()
-                pr.end_drawing()
-            sync_database(DB_PATH, RAW_DIR, callback_status)
-
         hover_data = pr.check_collision_point_rec(mouse_pos, btn_data_busca_rect)
         if hover_data and pr.is_mouse_button_pressed(pr.MOUSE_BUTTON_LEFT):
             inicio_usec = date_str_to_usec(data_inicio_str) if data_inicio_str else None
@@ -292,14 +211,14 @@ def main():
             mensagem_status = "Filtros limpos. Mostrando comentários recentes."
             timer_status = 2.0
 
-        # --- Roda do mouse para rolar resultados (CORRIGIDO) ---
+        # --- Roda do mouse para rolar resultados ---
         scroll_amount = pr.get_mouse_wheel_move()
         if scroll_amount != 0 and pr.check_collision_point_rec(mouse_pos, area_resultados_rect):
-            scroll_resultados -= int(scroll_amount * 2)   # converte para inteiro
+            scroll_resultados -= int(scroll_amount * 2)
             altura_item = 70
             max_scroll = max(0, len(resultados) - int(area_resultados_rect.height / altura_item))
             scroll_resultados = max(0, min(scroll_resultados, max_scroll))
-            scroll_resultados = int(scroll_resultados)   # garante inteiro
+            scroll_resultados = int(scroll_resultados)
 
         # --- Desenho da interface ---
         pr.begin_drawing()
@@ -322,10 +241,7 @@ def main():
         pr.draw_rectangle_rec(btn_busca_rect, cores["hover"] if hover_busca else cores["accent"])
         pr.draw_text("BUSCAR", int(btn_busca_rect.x) + 20, int(btn_busca_rect.y) + 10, 20, pr.WHITE)
 
-        # Botões de ação
-        pr.draw_rectangle_rec(btn_sincronizar_rect, cores["hover"] if hover_sinc else cores["accent"])
-        pr.draw_text("SINCRONIZAR", int(btn_sincronizar_rect.x) + 20, int(btn_sincronizar_rect.y) + 10, 18, pr.WHITE)
-
+        # Botões remanescentes (sem sincronizar)
         pr.draw_rectangle_rec(btn_data_busca_rect, cores["hover"] if hover_data else cores["accent"])
         pr.draw_text("DATA", int(btn_data_busca_rect.x) + 30, int(btn_data_busca_rect.y) + 10, 18, pr.WHITE)
 
@@ -345,7 +261,7 @@ def main():
             msg = "Nenhum comentário encontrado." if (texto_busca or data_inicio_str or data_fim_str) else "Digite uma palavra‑chave ou use filtros de data."
             pr.draw_text(msg, int(area_resultados_rect.x) + 20, int(area_resultados_rect.y) + 30, 20, cores["text_bright"])
         else:
-            idx_inicio = int(scroll_resultados)   # Garante inteiro para range()
+            idx_inicio = int(scroll_resultados)
             y_offset = area_resultados_rect.y + 10
             limite_y = area_resultados_rect.y + area_resultados_rect.height - 10
             for i in range(idx_inicio, min(len(resultados), idx_inicio + 50)):
