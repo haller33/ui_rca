@@ -1,8 +1,11 @@
 import pyray as pr
 import sqlite3
+import os
 
 # --- Configuration ---
-DB_NAME = "comments.db"
+DB_PATH = os.path.join(os.path.dirname(__file__), "./db_rca/comments.db")
+DB_NAME = DB_PATH
+# DB_NAME = "comments.db"
 SCREEN_WIDTH = 900
 SCREEN_HEIGHT = 700
 
