@@ -35,11 +35,11 @@ SOLARIZED_DARK = {
 
 # Tema atual (True = claro, False = escuro)
 tema_claro = True
+limite_resultados = 50  # limite de resultados exibidos (pode ser alterado com +/-)
 
 def get_colors():
     return SOLARIZED_LIGHT if tema_claro else SOLARIZED_DARK
 
-# --- Função auxiliar para timestamp vindo do SQLite (pode ser str ou int) ---
 def safe_timestamp_to_int(ts):
     if ts is None:
         return 0
@@ -47,9 +47,8 @@ def safe_timestamp_to_int(ts):
         return int(ts)
     return ts
 
-# --- Consulta ao banco com filtros ---
 def get_filtered_comments(keyword=None, start_usec=None, end_usec=None, limit=50):
-    """Busca comentários correspondentes à palavra-chave e/ou intervalo de datas."""
+    """Busca comentários e retorna (resultados, total_disponivel)"""
     conditions = []
     params = []
     if keyword and keyword.strip():
@@ -63,26 +62,28 @@ def get_filtered_comments(keyword=None, start_usec=None, end_usec=None, limit=50
         conditions.append("timestamp_usec <= ?")
         params.append(end_usec)
 
-    query = "SELECT author, message, timestamp_usec FROM comments"
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
-    query += " ORDER BY timestamp_usec DESC LIMIT ?"
-    params.append(limit)
+    where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+
+    # Query para contar total (sem limite)
+    count_query = f"SELECT COUNT(*) FROM comments{where_clause}"
+    # Query para buscar com limite
+    data_query = f"SELECT author, message, timestamp_usec FROM comments{where_clause} ORDER BY timestamp_usec DESC LIMIT ?"
+    data_params = params + [limit]
 
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute(query, params)
+        cursor.execute(count_query, params)
+        total = cursor.fetchone()[0]
+        cursor.execute(data_query, data_params)
         results = cursor.fetchall()
         conn.close()
-        return results
+        return results, total
     except Exception as e:
         print(f"Erro no banco de dados: {e}")
-        return []
+        return [], 0
 
-# --- Conversão de data string para microssegundos ---
 def date_str_to_usec(date_str, end_of_day=False):
-    """Converte YYYY-MM-DD para microssegundos desde a época. Se end_of_day=True, define 23:59:59.999999."""
     try:
         dt = datetime.strptime(date_str, "%Y-%m-%d")
         if end_of_day:
@@ -91,33 +92,69 @@ def date_str_to_usec(date_str, end_of_day=False):
     except ValueError:
         return None
 
-# --- Aplicação principal ---
 def main():
-    global tema_claro
+    global tema_claro, limite_resultados
     pr.init_window(SCREEN_WIDTH, SCREEN_HEIGHT, "Explorador de Comentários do YouTube")
     pr.set_target_fps(60)
+    pr.set_exit_key(pr.KEY_NULL)  # tratamos ESC manualmente
 
-    # Estado da UI
+    # Estado
     texto_busca = ""
     data_inicio_str = ""
     data_fim_str = ""
     mensagem_status = ""
     timer_status = 0.0
     resultados = []
+    total_resultados = 0
     scroll_resultados = 0
-
-    # Foco atual
     foco = None  # "busca", "data_inicio", "data_fim"
 
-    # Retângulos dos elementos (sem o botão sincronizar)
-    busca_rect = pr.Rectangle(50, 80, 400, 40)
-    btn_busca_rect = pr.Rectangle(470, 80, 100, 40)
-    area_resultados_rect = pr.Rectangle(50, 150, 1000, 600)
-    btn_data_busca_rect = pr.Rectangle(700, 80, 100, 40)
-    btn_limpar_rect = pr.Rectangle(820, 80, 80, 40)
-    btn_tema_rect = pr.Rectangle(SCREEN_WIDTH - 60, 20, 40, 40)
-    data_inicio_rect = pr.Rectangle(700, 140, 150, 35)
-    data_fim_rect = pr.Rectangle(870, 140, 150, 35)
+    # Variáveis para efeito de clique nos botões
+    btn_click_timer = 0.0
+    btn_hover_data = False
+
+    def atualizar_resultados():
+        nonlocal resultados, total_resultados, scroll_resultados
+        inicio_usec = date_str_to_usec(data_inicio_str) if data_inicio_str else None
+        fim_usec = date_str_to_usec(data_fim_str, end_of_day=True) if data_fim_str else None
+        if (data_inicio_str and inicio_usec is None) or (data_fim_str and fim_usec is None):
+            mensagem_status = "Formato de data inválido. Use AAAA-MM-DD."
+            timer_status = 2.0
+            return
+        resultados, total_resultados = get_filtered_comments(
+            keyword=texto_busca,
+            start_usec=inicio_usec,
+            end_usec=fim_usec,
+            limit=limite_resultados
+        )
+        scroll_resultados = 0
+        if len(resultados) > 0:
+            mensagem_status = f"Encontrados {len(resultados)} de {total_resultados} comentários (limite: {limite_resultados})."
+        else:
+            mensagem_status = "Nenhum comentário encontrado."
+        timer_status = 2.0
+
+    # Layout dinâmico (será recalculado a cada frame se a janela for redimensionada)
+    def atualizar_layout():
+        width = pr.get_screen_width()
+        height = pr.get_screen_height()
+        # Retângulos proporcionais
+        busca_rect = pr.Rectangle(50, 80, 400, 40)
+        btn_busca_rect = pr.Rectangle(470, 80, 100, 40)
+        area_resultados_rect = pr.Rectangle(50, 150, width - 100, height - 200)
+        btn_data_busca_rect = pr.Rectangle(width - 250, 80, 100, 40)
+        btn_limpar_rect = pr.Rectangle(width - 130, 80, 80, 40)
+        btn_tema_rect = pr.Rectangle(width - 60, 20, 40, 40)
+        data_inicio_rect = pr.Rectangle(width - 380, 140, 150, 35)
+        data_fim_rect = pr.Rectangle(width - 210, 140, 150, 35)
+        return (busca_rect, btn_busca_rect, area_resultados_rect, btn_data_busca_rect,
+                btn_limpar_rect, btn_tema_rect, data_inicio_rect, data_fim_rect)
+
+    # Inicialização
+    (busca_rect, btn_busca_rect, area_resultados_rect, btn_data_busca_rect,
+     btn_limpar_rect, btn_tema_rect, data_inicio_rect, data_fim_rect) = atualizar_layout()
+    # Carrega comentários iniciais
+    atualizar_resultados()
 
     def desenhar_campo_texto(rect, texto, ativo, placeholder=""):
         cores = get_colors()
@@ -131,6 +168,11 @@ def main():
         pr.draw_text(exibir, int(rect.x) + 8, int(rect.y) + 8, 20, cor_texto)
 
     while not pr.window_should_close():
+        # Redimensionamento
+        if pr.is_window_resized():
+            (busca_rect, btn_busca_rect, area_resultados_rect, btn_data_busca_rect,
+             btn_limpar_rect, btn_tema_rect, data_inicio_rect, data_fim_rect) = atualizar_layout()
+
         mouse_pos = pr.get_mouse_position()
         dt = pr.get_frame_time()
         if timer_status > 0:
@@ -138,9 +180,72 @@ def main():
         else:
             mensagem_status = ""
 
+        # Efeito de clique nos botões
+        if btn_click_timer > 0:
+            btn_click_timer -= dt
+
+        # Atalhos de teclado globais
+        if pr.is_key_pressed(pr.KEY_TAB):
+            # Alterna foco entre os três campos
+            if foco is None:
+                foco = "busca"
+            elif foco == "busca":
+                foco = "data_inicio"
+            elif foco == "data_inicio":
+                foco = "data_fim"
+            else:
+                foco = None
+        if pr.is_key_down(pr.KEY_LEFT_CONTROL) or pr.is_key_down(pr.KEY_RIGHT_CONTROL):
+            if pr.is_key_pressed(pr.KEY_L):
+                # Ctrl+L: limpa tudo
+                texto_busca = ""
+                data_inicio_str = ""
+                data_fim_str = ""
+                atualizar_resultados()
+            elif pr.is_key_pressed(pr.KEY_F):
+                # Ctrl+F: foco na busca
+                foco = "busca"
+        if pr.is_key_pressed(pr.KEY_ESCAPE):
+            pr.close_window()
+            return
+        # Ajuste de limite com +/-
+        if pr.is_key_pressed(pr.KEY_KP_ADD) or pr.is_key_pressed(pr.KEY_EQUAL):
+            limite_resultados = min(500, limite_resultados + 10)
+            atualizar_resultados()
+        elif pr.is_key_pressed(pr.KEY_KP_SUBTRACT) or pr.is_key_pressed(pr.KEY_MINUS):
+            limite_resultados = max(10, limite_resultados - 10)
+            atualizar_resultados()
+
         cores = get_colors()
 
-        # --- Clique do mouse para definir foco ---
+        # Entrada de teclado para campo focado
+        if foco:
+            tecla = pr.get_char_pressed()
+            while tecla > 0:
+                if 32 <= tecla <= 125 or tecla >= 160:
+                    if foco == "busca":
+                        texto_busca += chr(tecla)
+                        atualizar_resultados()
+                    elif foco == "data_inicio":
+                        data_inicio_str += chr(tecla)
+                        atualizar_resultados()
+                    elif foco == "data_fim":
+                        data_fim_str += chr(tecla)
+                        atualizar_resultados()
+                tecla = pr.get_char_pressed()
+
+            if pr.is_key_pressed(pr.KEY_BACKSPACE) or pr.is_key_pressed_repeat(pr.KEY_BACKSPACE):
+                if foco == "busca" and texto_busca:
+                    texto_busca = texto_busca[:-1]
+                    atualizar_resultados()
+                elif foco == "data_inicio" and data_inicio_str:
+                    data_inicio_str = data_inicio_str[:-1]
+                    atualizar_resultados()
+                elif foco == "data_fim" and data_fim_str:
+                    data_fim_str = data_fim_str[:-1]
+                    atualizar_resultados()
+
+        # Clique do mouse
         if pr.is_mouse_button_pressed(pr.MOUSE_BUTTON_LEFT):
             if pr.check_collision_point_rec(mouse_pos, busca_rect):
                 foco = "busca"
@@ -150,85 +255,42 @@ def main():
                 foco = "data_fim"
             elif pr.check_collision_point_rec(mouse_pos, btn_tema_rect):
                 tema_claro = not tema_claro
-                cores = get_colors()
+            elif pr.check_collision_point_rec(mouse_pos, btn_busca_rect):
+                atualizar_resultados()
+                btn_click_timer = 0.2
+            elif pr.check_collision_point_rec(mouse_pos, btn_data_busca_rect):
+                atualizar_resultados()
+                btn_click_timer = 0.2
+            elif pr.check_collision_point_rec(mouse_pos, btn_limpar_rect):
+                texto_busca = ""
+                data_inicio_str = ""
+                data_fim_str = ""
+                atualizar_resultados()
+                btn_click_timer = 0.2
             else:
                 foco = None
 
-        # --- Entrada de teclado para o campo focado ---
-        if foco:
-            tecla = pr.get_char_pressed()
-            while tecla > 0:
-                if 32 <= tecla <= 125 or tecla >= 160:
-                    if foco == "busca":
-                        texto_busca += chr(tecla)
-                    elif foco == "data_inicio":
-                        data_inicio_str += chr(tecla)
-                    elif foco == "data_fim":
-                        data_fim_str += chr(tecla)
-                tecla = pr.get_char_pressed()
-
-            if pr.is_key_pressed(pr.KEY_BACKSPACE) or pr.is_key_pressed_repeat(pr.KEY_BACKSPACE):
-                if foco == "busca":
-                    texto_busca = texto_busca[:-1]
-                elif foco == "data_inicio":
-                    data_inicio_str = data_inicio_str[:-1]
-                elif foco == "data_fim":
-                    data_fim_str = data_fim_str[:-1]
-
-            if pr.is_key_pressed(pr.KEY_ENTER):
-                if foco == "busca":
-                    resultados = get_filtered_comments(keyword=texto_busca)
-                    scroll_resultados = 0
-
-        # --- Ações dos botões ---
-        hover_busca = pr.check_collision_point_rec(mouse_pos, btn_busca_rect)
-        if hover_busca and pr.is_mouse_button_pressed(pr.MOUSE_BUTTON_LEFT):
-            resultados = get_filtered_comments(keyword=texto_busca)
-            scroll_resultados = 0
-            mensagem_status = f"Encontrados {len(resultados)} comentários."
-            timer_status = 2.0
-
-        hover_data = pr.check_collision_point_rec(mouse_pos, btn_data_busca_rect)
-        if hover_data and pr.is_mouse_button_pressed(pr.MOUSE_BUTTON_LEFT):
-            inicio_usec = date_str_to_usec(data_inicio_str) if data_inicio_str else None
-            fim_usec = date_str_to_usec(data_fim_str, end_of_day=True) if data_fim_str else None
-            if (data_inicio_str and inicio_usec is None) or (data_fim_str and fim_usec is None):
-                mensagem_status = "Formato de data inválido. Use AAAA-MM-DD."
-                timer_status = 2.0
-            else:
-                resultados = get_filtered_comments(keyword=texto_busca, start_usec=inicio_usec, end_usec=fim_usec)
-                scroll_resultados = 0
-                mensagem_status = f"Encontrados {len(resultados)} comentários."
-                timer_status = 2.0
-
-        hover_limpar = pr.check_collision_point_rec(mouse_pos, btn_limpar_rect)
-        if hover_limpar and pr.is_mouse_button_pressed(pr.MOUSE_BUTTON_LEFT):
-            texto_busca = ""
-            data_inicio_str = ""
-            data_fim_str = ""
-            resultados = get_filtered_comments()
-            scroll_resultados = 0
-            mensagem_status = "Filtros limpos. Mostrando comentários recentes."
-            timer_status = 2.0
-
-        # --- Roda do mouse para rolar resultados ---
+        # Scroll da área de resultados
         scroll_amount = pr.get_mouse_wheel_move()
         if scroll_amount != 0 and pr.check_collision_point_rec(mouse_pos, area_resultados_rect):
-            scroll_resultados -= int(scroll_amount * 2)
             altura_item = 70
             max_scroll = max(0, len(resultados) - int(area_resultados_rect.height / altura_item))
+            scroll_resultados -= int(scroll_amount * 2)
             scroll_resultados = max(0, min(scroll_resultados, max_scroll))
-            scroll_resultados = int(scroll_resultados)
 
-        # --- Desenho da interface ---
+        # Desenho
         pr.begin_drawing()
         pr.clear_background(cores["bg"])
 
         # Cabeçalho
-        pr.draw_rectangle(0, 0, SCREEN_WIDTH, 60, cores["accent"])
+        pr.draw_rectangle(0, 0, pr.get_screen_width(), 60, cores["accent"])
         pr.draw_text("Explorador de Comentários do YouTube", 50, 15, 30, pr.WHITE)
 
-        # Botão de tema
+        # Informação do limite
+        limite_text = f"Limite: {limite_resultados} (+/-)"
+        pr.draw_text(limite_text, pr.get_screen_width() - 120, 25, 14, pr.WHITE)
+
+        # Botão tema
         icone_tema = "🌙" if tema_claro else "☀️"
         btn_tema_cor = cores["hover"] if pr.check_collision_point_rec(mouse_pos, btn_tema_rect) else cores["panel"]
         pr.draw_rectangle_rec(btn_tema_rect, btn_tema_cor)
@@ -238,14 +300,25 @@ def main():
         # Campo de busca
         pr.draw_text("Buscar por palavra‑chave (autor ou mensagem):", 50, 60, 16, cores["text"])
         desenhar_campo_texto(busca_rect, texto_busca, foco == "busca", "Digite a palavra‑chave...")
-        pr.draw_rectangle_rec(btn_busca_rect, cores["hover"] if hover_busca else cores["accent"])
+        # Botão BUSCAR
+        cor_busca = cores["hover"] if pr.check_collision_point_rec(mouse_pos, btn_busca_rect) else cores["accent"]
+        if btn_click_timer > 0 and pr.check_collision_point_rec(mouse_pos, btn_busca_rect):
+            cor_busca = cores["success"]
+        pr.draw_rectangle_rec(btn_busca_rect, cor_busca)
         pr.draw_text("BUSCAR", int(btn_busca_rect.x) + 20, int(btn_busca_rect.y) + 10, 20, pr.WHITE)
 
-        # Botões remanescentes (sem sincronizar)
-        pr.draw_rectangle_rec(btn_data_busca_rect, cores["hover"] if hover_data else cores["accent"])
+        # Botão DATA
+        cor_data = cores["hover"] if pr.check_collision_point_rec(mouse_pos, btn_data_busca_rect) else cores["accent"]
+        if btn_click_timer > 0 and pr.check_collision_point_rec(mouse_pos, btn_data_busca_rect):
+            cor_data = cores["success"]
+        pr.draw_rectangle_rec(btn_data_busca_rect, cor_data)
         pr.draw_text("DATA", int(btn_data_busca_rect.x) + 30, int(btn_data_busca_rect.y) + 10, 18, pr.WHITE)
 
-        pr.draw_rectangle_rec(btn_limpar_rect, cores["hover"] if hover_limpar else cores["error"])
+        # Botão LIMPAR
+        cor_limpar = cores["hover"] if pr.check_collision_point_rec(mouse_pos, btn_limpar_rect) else cores["error"]
+        if btn_click_timer > 0 and pr.check_collision_point_rec(mouse_pos, btn_limpar_rect):
+            cor_limpar = cores["success"]
+        pr.draw_rectangle_rec(btn_limpar_rect, cor_limpar)
         pr.draw_text("LIMPAR", int(btn_limpar_rect.x) + 12, int(btn_limpar_rect.y) + 10, 18, pr.WHITE)
 
         # Campos de data
@@ -255,13 +328,14 @@ def main():
         # Área de resultados
         pr.draw_rectangle_rec(area_resultados_rect, cores["panel"])
         pr.draw_rectangle_lines_ex(area_resultados_rect, 2, cores["border"])
-        pr.draw_text("Comentários", int(area_resultados_rect.x) + 10, int(area_resultados_rect.y) - 25, 18, cores["accent"])
+        titulo = f"Comentários ({len(resultados)} exibidos de {total_resultados})"
+        pr.draw_text(titulo, int(area_resultados_rect.x) + 10, int(area_resultados_rect.y) - 25, 18, cores["accent"])
 
         if not resultados:
             msg = "Nenhum comentário encontrado." if (texto_busca or data_inicio_str or data_fim_str) else "Digite uma palavra‑chave ou use filtros de data."
             pr.draw_text(msg, int(area_resultados_rect.x) + 20, int(area_resultados_rect.y) + 30, 20, cores["text_bright"])
         else:
-            idx_inicio = int(scroll_resultados)
+            idx_inicio = scroll_resultados
             y_offset = area_resultados_rect.y + 10
             limite_y = area_resultados_rect.y + area_resultados_rect.height - 10
             for i in range(idx_inicio, min(len(resultados), idx_inicio + 50)):
@@ -274,7 +348,6 @@ def main():
                 pr.draw_text(f"{autor} ({data_str})", int(area_resultados_rect.x) + 15, int(y_offset), 16, cores["accent"])
                 pr.draw_text(msg_exibida, int(area_resultados_rect.x) + 15, int(y_offset) + 22, 18, cores["text"])
 
-                # Linha separadora
                 x1 = int(area_resultados_rect.x) + 10
                 y1 = int(y_offset) + 48
                 x2 = int(area_resultados_rect.x + area_resultados_rect.width - 10)
@@ -294,7 +367,7 @@ def main():
         # Mensagem de status
         if mensagem_status:
             cor = cores["error"] if ("erro" in mensagem_status.lower() or "inválido" in mensagem_status.lower()) else cores["success"]
-            pr.draw_text(mensagem_status, 50, SCREEN_HEIGHT - 30, 18, cor)
+            pr.draw_text(mensagem_status, 50, pr.get_screen_height() - 30, 18, cor)
 
         pr.end_drawing()
 
